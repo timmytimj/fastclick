@@ -71,7 +71,7 @@ IPMapper::rewrite_flowid(IPRewriterInput *, const IPFlowID &, IPFlowID &,
 //
 
 IPRewriterBase::IPRewriterBase()
-    : _gc_timer(), _set_aggregate(false)
+    : _state(), _set_aggregate(false)
 {
     _gc_interval_sec = default_gc_interval;
 
@@ -191,6 +191,7 @@ IPRewriterBase::configure(Vector<String> &conf, ErrorHandler *errh)
 	.read("REAP_INTERVAL", SecondsArg(), _gc_interval_sec)
 	.read("REAP_TIME", Args::deprecated, SecondsArg(), _gc_interval_sec)
 	.read("SET_AGGREGATE", _set_aggregate)
+	.read("USE_CACHE", _use_cache)
 	.consume() < 0)
 	return -1;
 
@@ -249,11 +250,11 @@ IPRewriterBase::initialize(ErrorHandler *errh)
 	if (_input_specs[i].kind == IPRewriterInput::i_mapper)
 	    _input_specs[i].u.mapper->notify_rewriter(this, &_input_specs[i], &cerrh);
     }
-    for (int i = 0; i < _gc_timer.weight(); i ++) {
-        Timer& gc_timer = _gc_timer.get_value(i);
+    for (int i = 0; i < _state.weight(); i ++) {
+        Timer& gc_timer = _state.get_value(i).gc_timer;
         new(&gc_timer) Timer(gc_timer_hook, this); //Reconstruct as Timer does not allow assignment
         gc_timer.initialize(this);
-        gc_timer.move_thread(_gc_timer.get_mapping(i));
+        gc_timer.move_thread(_state.get_mapping(i));
         if (_gc_interval_sec)
             gc_timer.schedule_after_sec(_gc_interval_sec);
     }
