@@ -22,7 +22,7 @@
 #include <rte_pci.h>
 #include <rte_version.h>
 
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+#if HAVE_FLOW_API
     #include <click/flowruleparser.hh>
 #endif
 
@@ -37,6 +37,12 @@
 #include <click/args.hh>
 #include <click/etheraddress.hh>
 #include <click/timer.hh>
+
+#if RTE_VERSION < RTE_VERSION_NUM(19,8,0,0)
+#define rte_ipv4_hdr ipv4_hdr
+#define rte_ether_addr ether_addr
+#endif
+#include <nicscheduler/ethernetdevice.hh>
 
 #if RTE_VERSION < RTE_VERSION_NUM(19,8,0,0)
 #define rte_ipv4_hdr ipv4_hdr
@@ -69,21 +75,21 @@ typedef uint32_t counter_t;
 
 extern bool dpdk_enabled;
 
-class DPDKDevice {
+class DPDKDevice : public DPDKEthernetDevice {
 public:
 
-    portid_t port_id;
 
-    DPDKDevice() CLICK_COLD;
-    DPDKDevice(portid_t port_id) CLICK_COLD;
+    DPDKDevice(portid_t port_id = -1) CLICK_COLD;
 
     struct DevInfo {
         inline DevInfo() :
             vendor_id(PCI_ANY_ID), vendor_name(), device_id(PCI_ANY_ID), driver(0),
             init_mac(), init_mtu(0), init_rss(-1), init_fc_mode(FC_UNSET),
             rx_queues(0, false), tx_queues(0, false), n_rx_descs(0), n_tx_descs(0),
-            num_pools(0), mq_mode((enum rte_eth_rx_mq_mode)-1), mq_mode_str(""),
-            promisc(false), flow_isolate(false), rx_offload(0), tx_offload(0),
+            num_pools(0), promisc(false),
+	    mq_mode((enum rte_eth_rx_mq_mode)-1), mq_mode_str(""),
+            rx_offload(0), tx_offload(0),	
+	    flow_isolate(false),
             vlan_filter(false), vlan_strip(false), vlan_extend(false), vf_vlan(),
             lro(false), jumbo(false)
         {
@@ -148,7 +154,7 @@ public:
         bool jumbo;
     };
 
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+#if HAVE_FLOW_API
     void initialize_flow_rule_manager(
         const portid_t &port_id,
         ErrorHandler   *errh
@@ -174,7 +180,19 @@ public:
     void set_init_fc_mode(FlowControlMode fc);
     void set_rx_offload(uint64_t offload);
     void set_tx_offload(uint64_t offload);
-    void set_flow_isolate(const bool &flow_isolate);
+    void set_init_flow_isolate(const bool &flow_isolate);
+
+    inline void set_isolation_mode(const bool &isolated) {
+        info.flow_isolate = isolated;
+        if (info.flow_isolate) {
+            rte_flow_isolate(port_id, 1, 0);
+        } else {
+            rte_flow_isolate(port_id, 0, 0);
+        }
+    };
+    inline bool isolated() { return info.flow_isolate; };
+
+
 
     unsigned int get_nb_rxdesc();
     unsigned int get_nb_txdesc();
@@ -183,7 +201,13 @@ public:
     String get_device_vendor_name();
     uint16_t get_device_id();
     const char *get_device_driver();
-    int set_rss_max(int max);
+
+    int dpdk_set_rss_max(int max);
+    int dpdk_set_rss_reta(unsigned* reta, unsigned reta_sz);
+    int dpdk_get_rss_reta_size() const;
+    Vector<unsigned>  dpdk_get_rss_reta() const;
+
+    EthernetDevice* get_eth_device();
 
     static unsigned int dev_count() {
 #if RTE_VERSION >= RTE_VERSION_NUM(18,05,0,0)
@@ -197,7 +221,7 @@ public:
 
     static int get_port_numa_node(portid_t port_id);
 
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+#if HAVE_FLOW_API
     int set_mode(
         String mode, int num_pools, Vector<int> vf_vlan,
         const String &flow_rules_filename, ErrorHandler *errh
@@ -231,19 +255,23 @@ public:
     }
 
     inline static bool is_dpdk_buffer(Packet* p) {
-        return is_dpdk_packet(p) || (p->data_packet() && is_dpdk_packet(p->data_packet()));
+        return is_dpdk_packet(p)
+#ifndef CLICK_NOINDIRECT
+            || (p->data_packet() && is_dpdk_packet(p->data_packet()))
+#endif
+        ;
     }
 #endif
 
     inline static rte_mbuf* get_pkt(unsigned numa_node);
     inline static rte_mbuf* get_pkt();
-    inline static struct rte_mbuf* get_mbuf(Packet* p, bool create, int node);
+    inline static struct rte_mbuf* get_mbuf(Packet* p, bool create, int node, bool reset = true);
 
     static void free_pkt(unsigned char *, size_t, void *pktmbuf);
 
     static unsigned int get_nb_txdesc(const portid_t &port_id);
 
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+#if HAVE_FLOW_API
     static int configure_nic(const portid_t &port_id);
 #endif
 
@@ -293,7 +321,7 @@ public:
     */
     class TXInternalQueue {
         public:
-            TXInternalQueue() : pkts(0), index(0), nr_pending(0) { }
+            TXInternalQueue() : pkts(0), index(0), nr_pending(0), timeout() { }
 
             // Array of DPDK Buffers
             struct rte_mbuf **pkts;
@@ -413,25 +441,37 @@ template<> struct DefaultArg<FlowControlMode> : public FlowControlModeArg {};
  *     If compiled with CLICK_PACKET_USE_DPDK, it will simply return the packet
  *     casted as it's already a DPDK buffer.
  */
-inline struct rte_mbuf* DPDKDevice::get_mbuf(Packet* p, bool create, int node) {
+inline struct rte_mbuf* DPDKDevice::get_mbuf(Packet* p, bool create, int node, bool reset) {
     struct rte_mbuf* mbuf;
     #if CLICK_PACKET_USE_DPDK
     mbuf = p->mb();
+    #elif CLICK_PACKET_INSIDE_DPDK
+    mbuf = ((struct rte_mbuf*)p) - 1;
+    rte_pktmbuf_pkt_len(mbuf) = p->length();
+    rte_pktmbuf_data_len(mbuf) = p->length();
+    mbuf->data_off = p->headroom();
     #else
-    if (likely(DPDKDevice::is_dpdk_packet(p) && (mbuf = (struct rte_mbuf *) p->destructor_argument()))
-        || unlikely(p->data_packet() && DPDKDevice::is_dpdk_packet(p->data_packet()) && (mbuf = (struct rte_mbuf *) p->data_packet()->destructor_argument()))) {
+    if (likely(DPDKDevice::is_dpdk_packet(p) && (mbuf = (struct rte_mbuf *)((unsigned char*) p->buffer() - sizeof(rte_mbuf)) ))
+#ifndef CLICK_NOINDIRECT
+        || unlikely(p->data_packet() && DPDKDevice::is_dpdk_packet(p->data_packet()) && (mbuf = (struct rte_mbuf *) p->data_packet()->destructor_argument()))
+#endif
+            ) {
         /* If the packet is an unshared DPDK packet, we can send
          *  the mbuf as it to DPDK*/
         rte_pktmbuf_pkt_len(mbuf) = p->length();
         rte_pktmbuf_data_len(mbuf) = p->length();
         mbuf->data_off = p->headroom();
+#ifndef CLICK_NOINDIRECT
         if (p->shared()) {
             /*Prevent DPDK from freeing the buffer. When all shared packet
              * are freed, DPDKDevice::free_pkt will effectively destroy it.*/
             rte_mbuf_refcnt_update(mbuf, 1);
-        } else {
+        } else
+#endif
+        {
             //Reset buffer, let DPDK free the buffer when it wants
-            p->reset_buffer();
+            if (reset)
+                p->reset_buffer();
         }
     } else {
         if (create) {

@@ -16,19 +16,26 @@
 
 class RXQueueDevice;
 class TXQueueDevice;
+
 class QueueDevice : public BatchElement {
 
 public:
 
     QueueDevice() CLICK_COLD;
 
+    const char *class_name() const		{ return "QueueDevice"; }
+
     static void static_initialize();
 
+    unsigned get_nb_desc() {
+        return ndesc;
+    }
 private :
     /* Those two are only used during configurations. On runtime, the final
      * n_queues choice is used.*/
     int _minqueues;
     int _maxqueues;
+
     friend RXQueueDevice;
     friend TXQueueDevice;
 protected:
@@ -254,6 +261,8 @@ protected:
 
 class TXQueueDevice : public QueueDevice {
 protected:
+    TXQueueDevice();
+
     bool _blocking;
     int _internal_tx_queue_size;
 

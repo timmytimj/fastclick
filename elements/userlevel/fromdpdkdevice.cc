@@ -25,15 +25,15 @@
 #include <click/standard/scheduleinfo.hh>
 #include <click/etheraddress.hh>
 #include <click/straccum.hh>
+#include <click/dpdk_glue.hh>
 
 #include "fromdpdkdevice.hh"
 #include "tscclock.hh"
 #include "todpdkdevice.hh"
-#if HAVE_JSON
-#include "../json/json.hh"
-#endif
+#include <click/dpdk_glue.hh>
+#include <click/json.hh>
 
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+#if HAVE_FLOW_API
     #include <click/flowrulemanager.hh>
 #endif
 
@@ -42,7 +42,7 @@ CLICK_DECLS
 #define LOAD_UNIT 10
 
 FromDPDKDevice::FromDPDKDevice() :
-    _dev(0)
+    _dev(0), _tco(false), _uco(false), _ipco(false)
 #if HAVE_DPDK_INTERRUPT
     ,_rx_intr(-1)
 #endif
@@ -76,9 +76,9 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
     Vector<int> vf_vlan;
     int max_rss = 0;
     bool has_rss = false;
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
-    String flow_rules_filename;
     bool flow_isolate = false;
+#if HAVE_FLOW_API
+    String flow_rules_filename;
 #endif
     if (Args(this, errh).bind(conf)
         .read_mp("PORT", dev)
@@ -93,9 +93,9 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
         .read("MAC", mac).read_status(has_mac)
         .read("MTU", mtu).read_status(has_mtu)
         .read("MODE", mode)
-    #if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
-        .read("FLOW_RULES_FILE", flow_rules_filename)
         .read("FLOW_ISOLATE", flow_isolate)
+    #if HAVE_FLOW_API
+        .read("FLOW_RULES_FILE", flow_rules_filename)
     #endif
         .read("VF_POOLS", num_pools)
         .read_all("VF_VLAN", vf_vlan)
@@ -106,7 +106,13 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
 #endif
         .read("MAX_RSS", max_rss).read_status(has_rss)
         .read("TIMESTAMP", set_timestamp)
+        .read_or_set("CLEAR", _clear, false)
         .read("PAUSE", fc_mode)
+#if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
+        .read("IPCO", _ipco)
+        .read("TCO", _tco)
+        .read("UCO", _uco)
+#endif
         .complete() < 0)
         return -1;
 
@@ -150,6 +156,13 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
     if (fc_mode != FC_UNSET)
         _dev->set_init_fc_mode(fc_mode);
 
+    if (_ipco || _tco || _uco)
+        _dev->set_rx_offload(DEV_RX_OFFLOAD_IPV4_CKSUM);
+    if (_tco)
+        _dev->set_rx_offload(DEV_RX_OFFLOAD_TCP_CKSUM);
+    if (_uco)
+        _dev->set_rx_offload(DEV_RX_OFFLOAD_UDP_CKSUM);
+
     if (set_timestamp) {
 #if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
         _dev->set_rx_offload(DEV_RX_OFFLOAD_TIMESTAMP);
@@ -164,7 +177,8 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
     if (has_rss)
         _dev->set_init_rss_max(max_rss);
 
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+    _dev->set_init_flow_isolate(flow_isolate);
+#if HAVE_FLOW_API
     if ((mode == FlowRuleManager::DISPATCHING_MODE) && (flow_rules_filename.empty())) {
         errh->warning(
             "DPDK Flow Rule Manager (port %s): FLOW_RULES_FILE is not set, "
@@ -174,8 +188,6 @@ int FromDPDKDevice::configure(Vector<String> &conf, ErrorHandler *errh)
     }
 
     r = _dev->set_mode(mode, num_pools, vf_vlan, flow_rules_filename, errh);
-
-    _dev->set_flow_isolate(flow_isolate);
 #else
     r = _dev->set_mode(mode, num_pools, vf_vlan, errh);
 #endif
@@ -206,9 +218,12 @@ void* FromDPDKDevice::cast(const char* name) {
     if (String(name) == "UserClockSource")
         return &dpdk_clock;
 #endif
+    if (String(name) == "EthernetDevice")
+        return get_eth_device();
+    if (String(name) == "DPDKDevice")
+        return _dev;
     return RXQueueDevice::cast(name);
 }
-
 
 int FromDPDKDevice::initialize(ErrorHandler *errh)
 {
@@ -280,6 +295,26 @@ void FromDPDKDevice::cleanup(CleanupStage)
     cleanup_tasks();
 }
 
+void FromDPDKDevice::clear_buffers() {
+    rte_mbuf* pkts[32];
+    for (int q = firstqueue; q <= lastqueue; q++) {
+        unsigned n;
+        int tot = 0;
+        do {
+            n = rte_eth_rx_burst(_dev->port_id, q, pkts, 32);
+            tot += n;
+            for (int i = 0; i < n; i ++) {
+                 rte_pktmbuf_free(pkts[i]);
+            }
+            if (tot > _dev->get_nb_rxdesc()) {
+                click_chatter("WARNING : Called clear_buffers while receiving packets !");
+                break;
+            }
+        } while (n > 0);
+        click_chatter("Cleared %d buffers for queue %d",tot,q);
+    }
+}
+
 bool FromDPDKDevice::run_task(Task *t)
 {
     struct rte_mbuf *pkts[_burst];
@@ -296,18 +331,19 @@ bool FromDPDKDevice::run_task(Task *t)
             unsigned char* data = rte_pktmbuf_mtod(pkts[i], unsigned char *);
             rte_prefetch0(data);
 #if CLICK_PACKET_USE_DPDK
-            WritablePacket *p = static_cast<WritablePacket*>(Packet::make(pkts[i]));
+    WritablePacket *p = static_cast<WritablePacket *>(Packet::make(pkts[i], _clear));
 #elif HAVE_ZEROCOPY
             WritablePacket *p = Packet::make(data,
                      rte_pktmbuf_data_len(pkts[i]),
                      DPDKDevice::free_pkt,
                      pkts[i],
                      rte_pktmbuf_headroom(pkts[i]),
-                     rte_pktmbuf_tailroom(pkts[i])
+                     rte_pktmbuf_tailroom(pkts[i]),
+                     _clear
                      );
 #else
             WritablePacket *p = Packet::make(data,
-                                     (uint32_t)rte_pktmbuf_pkt_len(pkts[i]));
+                                     (uint32_t)rte_pktmbuf_pkt_len(pkts[i]), _clear);
             rte_pktmbuf_free(pkts[i]);
             data = p->data();
 #endif
@@ -324,8 +360,8 @@ bool FromDPDKDevice::run_task(Task *t)
             }
 
 #if RTE_VERSION >= RTE_VERSION_NUM(18,02,0,0)
-            if (_set_timestamp && (pkts[i]->ol_flags & PKT_RX_TIMESTAMP)) {
-                p->timestamp_anno().assignlong(pkts[i]->timestamp);
+            if (_set_timestamp && HAS_TIMESTAMP(pkts[i])) {
+                p->timestamp_anno().assignlong(TIMESTAMP_FIELD(pkts[i]));
             }
 #endif
 #if HAVE_BATCH
@@ -398,12 +434,12 @@ enum {
     h_active, h_safe_active,
     h_xstats, h_queue_count,
     h_nb_rx_queues, h_nb_tx_queues, h_nb_vf_pools,
-    h_rss,
+    h_rss, h_rss_reta, h_rss_reta_size,
     h_mac, h_add_mac, h_remove_mac, h_vf_mac,
     h_mtu,
-    h_device,
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
-    h_rule_add, h_rules_del, h_rules_isolate, h_rules_flush,
+    h_device, h_isolate,
+#if HAVE_FLOW_API
+    h_rule_add, h_rules_del, h_rules_flush,
     h_rules_list, h_rules_list_with_hits, h_rules_ids_global, h_rules_ids_internal,
     h_rules_count, h_rules_count_with_hits, h_rule_packet_hits, h_rule_byte_count,
     h_rules_aggr_stats
@@ -470,6 +506,15 @@ String FromDPDKDevice::read_handler(Element *e, void * thunk)
             return fd->_dev->get_device_vendor_name();
         case h_driver:
             return String(fd->_dev->get_device_driver());
+        case h_rss_reta_size:
+		    return String(fd->_dev->dpdk_get_rss_reta_size());
+        case h_rss_reta:
+            StringAccum acc;
+            Vector<unsigned> list = fd->_dev->dpdk_get_rss_reta();
+            for (int i= 0; i < list.size(); i++) {
+                acc << list[i] << " ";
+            }
+            return acc.take_string();
     }
 
     return 0;
@@ -526,7 +571,10 @@ String FromDPDKDevice::statistics_handler(Element *e, void *thunk)
             return String(stats.imissed);
         case h_ierrors:
             return String(stats.ierrors);
-    #if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+        case h_isolate: {
+            return String(fd->get_device()->isolated() ? "1" : "0");
+        }
+    #if HAVE_FLOW_API
         case h_rules_list: {
             portid_t port_id = fd->get_device()->get_port_id();
             return FlowRuleManager::get_flow_rule_mgr(port_id)->flow_rules_list();
@@ -550,10 +598,6 @@ String FromDPDKDevice::statistics_handler(Element *e, void *thunk)
         case h_rules_count_with_hits: {
             portid_t port_id = fd->get_device()->get_port_id();
             return String(FlowRuleManager::get_flow_rule_mgr(port_id)->flow_rules_with_hits_count());
-        }
-        case h_rules_isolate: {
-            portid_t port_id = fd->get_device()->get_port_id();
-            return String(FlowRuleManager::isolated(port_id) ? "1" : "0");
         }
     #endif
         case h_nombufs:
@@ -626,13 +670,22 @@ int FromDPDKDevice::write_handler(
             int max;
             if (!IntArg().parse<int>(input,max))
                 return errh->error("Not a valid integer");
-            return fd->_dev->set_rss_max(max);
+            return fd->_dev->dpdk_set_rss_max(max);
         }
+        case h_isolate: {
+            if (input.empty()) {
+                return errh->error("DPDK Flow Rule Manager (port %u): Specify isolation mode (true/1 -> isolation, otherwise no isolation)", fd->_dev->port_id);
+            }
+            bool status = (input.lower() == "true") || (input.lower() == "1") ? true : false;
+            fd->_dev->set_isolation_mode(status);
+            return 0;
+        }
+
     }
     return -1;
 }
 
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+#if HAVE_FLOW_API
 int FromDPDKDevice::flow_handler(
         const String &input, Element *e, void *thunk, ErrorHandler *errh)
 {
@@ -696,14 +749,6 @@ int FromDPDKDevice::flow_handler(
 
             // Batch deletion
             return flow_rule_mgr->flow_rules_delete((uint32_t *) rule_ids, rules_nb);
-        }
-        case h_rules_isolate: {
-            if (input.empty()) {
-                return errh->error("DPDK Flow Rule Manager (port %u): Specify isolation mode (true/1 -> isolation, otherwise no isolation)", port_id);
-            }
-            bool status = (input.lower() == "true") || (input.lower() == "1") ? true : false;
-            FlowRuleManager::set_isolation_mode(port_id, status);
-            return 0;
         }
         case h_rules_flush: {
             return flow_rule_mgr->flow_rules_flush();
@@ -773,7 +818,7 @@ int FromDPDKDevice::xstats_handler(
                 input = String(v);
             }
             return 0;
-    #if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+    #if HAVE_FLOW_API
         case h_rule_byte_count:
         case h_rule_packet_hits: {
             portid_t port_id = fd->get_device()->get_port_id();
@@ -840,7 +885,7 @@ void FromDPDKDevice::add_handlers()
     set_handler("queue_count", Handler::f_read | Handler::f_read_param, xstats_handler, h_queue_count);
     set_handler("queue_packets", Handler::f_read | Handler::f_read_param, xstats_handler, h_stats_packets);
     set_handler("queue_bytes", Handler::f_read | Handler::f_read_param, xstats_handler, h_stats_bytes);
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+#if HAVE_FLOW_API
     set_handler(FlowRuleManager::FLOW_RULE_PACKET_HITS, Handler::f_read | Handler::f_read_param, xstats_handler, h_rule_packet_hits);
     set_handler(FlowRuleManager::FLOW_RULE_BYTE_COUNT,  Handler::f_read | Handler::f_read_param, xstats_handler, h_rule_byte_count);
     set_handler(FlowRuleManager::FLOW_RULE_AGGR_STATS,  Handler::f_read | Handler::f_read_param, xstats_handler, h_rules_aggr_stats);
@@ -865,6 +910,8 @@ void FromDPDKDevice::add_handlers()
     add_read_handler("vf_mac_addr",read_handler, h_vf_mac);
 
     add_write_handler("max_rss", write_handler, h_rss, 0);
+    add_read_handler("rss_reta",read_handler, h_rss_reta);
+    add_read_handler("rss_reta_size",read_handler, h_rss_reta_size);
 
     add_read_handler("hw_count",statistics_handler, h_ipackets);
     add_read_handler("hw_bytes",statistics_handler, h_ibytes);
@@ -872,10 +919,12 @@ void FromDPDKDevice::add_handlers()
     add_read_handler("hw_errors",statistics_handler, h_ierrors);
     add_read_handler("nombufs",statistics_handler, h_nombufs);
 
-#if RTE_VERSION >= RTE_VERSION_NUM(20,2,0,0)
+    add_write_handler("flow_isolate", write_handler, h_isolate, 0);
+    add_read_handler ("flow_isolate", statistics_handler, h_isolate);
+
+#if HAVE_FLOW_API
     add_write_handler(FlowRuleManager::FLOW_RULE_ADD,     flow_handler, h_rule_add,    0);
     add_write_handler(FlowRuleManager::FLOW_RULE_DEL,     flow_handler, h_rules_del,   0);
-    add_write_handler(FlowRuleManager::FLOW_RULE_ISOLATE, flow_handler, h_rules_isolate, 0);
     add_write_handler(FlowRuleManager::FLOW_RULE_FLUSH,   flow_handler, h_rules_flush, 0);
     add_read_handler (FlowRuleManager::FLOW_RULE_IDS_GLB,         statistics_handler, h_rules_ids_global);
     add_read_handler (FlowRuleManager::FLOW_RULE_IDS_INT,         statistics_handler, h_rules_ids_internal);
@@ -883,7 +932,6 @@ void FromDPDKDevice::add_handlers()
     add_read_handler (FlowRuleManager::FLOW_RULE_LIST_WITH_HITS,  statistics_handler, h_rules_list_with_hits);
     add_read_handler (FlowRuleManager::FLOW_RULE_COUNT,           statistics_handler, h_rules_count);
     add_read_handler (FlowRuleManager::FLOW_RULE_COUNT_WITH_HITS, statistics_handler, h_rules_count_with_hits);
-    add_read_handler (FlowRuleManager::FLOW_RULE_ISOLATE,         statistics_handler, h_rules_isolate);
 #endif
 
     add_read_handler("mtu",read_handler, h_mtu);

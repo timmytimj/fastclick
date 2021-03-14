@@ -35,7 +35,7 @@
 #include <click/notifier.hh>
 #include <click/nameinfo.hh>
 #include <click/bighashmap_arena.hh>
-#if HAVE_DPDK_PACKET_POOL
+#if HAVE_DPDK_PACKET_POOL || CLICK_PACKET_USE_DPDK
 #include <click/dpdkdevice.hh>
 #endif
 #if HAVE_NETMAP_PACKET_POOL
@@ -57,6 +57,8 @@
 #if CLICK_NS
 # include "../elements/ns/fromsimdevice.hh"
 #endif
+
+extern void click_delete_element(Element*);
 
 CLICK_DECLS
 
@@ -132,10 +134,10 @@ Router::~Router()
     // Delete elements in reverse configuration order
     if (_element_configure_order.size())
         for (int ord = _elements.size() - 1; ord >= 0; ord--)
-            delete _elements[ _element_configure_order[ord] ];
+            click_delete_element(_elements[ _element_configure_order[ord] ]);
     else
         for (int i = 0; i < _elements.size(); i++)
-            delete _elements[i];
+            click_delete_element(_elements[i]);
 
     delete _root_element;
 
@@ -848,7 +850,12 @@ Router::adjust_runcount(int32_t delta)
             new_value = STOP_RUNCOUNT;
         else
             new_value = old_value + delta;
+#if ! CLICK_ATOMIC_COMPARE_SWAP
+    } while (! _runcount.compare_and_swap(old_value, new_value));
+#else
     } while (_runcount.compare_swap(old_value, new_value) != old_value);
+#endif
+
     if ((int32_t) new_value <= 0)
         _master->request_stop();
 }
@@ -1075,7 +1082,6 @@ class ElementFilterRouterVisitor : public RouterVisitor { public:
 
 };
 }
-
 
 /** @brief Search for elements downstream from @a e.
  * @param e element to start search
@@ -1309,6 +1315,14 @@ Router::initialize(ErrorHandler *errh)
     char dmalloc_buf[12];
 #endif
 
+
+#if HAVE_DPDK_PACKET_POOL || CLICK_PACKET_USE_DPDK
+    if (all_ok) {
+        //DPDK initialization may be affected by some configuration and needed by some element initialization (Packet::make with --enable-dpdk-pool)
+        all_ok = DPDKDevice::static_initialize(ErrorHandler::default_handler()) == 0;
+    }
+#endif
+
     // Configure all elements in configure order. Remember the ones that failed
     if (all_ok) {
         Vector<String> conf;
@@ -1337,13 +1351,6 @@ Router::initialize(ErrorHandler *errh)
                 element_stage[i] = Element::CLEANUP_CONFIGURED;
         }
     }
-
-#if HAVE_DPDK_PACKET_POOL
-    if (all_ok) {
-        //DPDK initialization may be affected by some configuration and needed by some element initialization (Packet::make with --enable-dpdk-pool)
-        all_ok = DPDKDevice::static_initialize(ErrorHandler::default_handler()) == 0;
-    }
-#endif
 
 #if HAVE_BATCH
     if (all_ok) {
@@ -1439,6 +1446,26 @@ Router::initialize(ErrorHandler *errh)
             if (!errh->nerrors())
                 errh->error("unspecified error");
             all_ok = false;
+        }
+    }
+
+    // Initialize threads if OK so far.
+    if (all_ok) {
+        for (int ord = 0; all_ok && ord < _elements.size(); ord++) {
+            int i = _element_configure_order[ord];
+            assert(element_stage[i] == Element::CLEANUP_INITIALIZED);
+            RouterContextErrh cerrh(errh, "While thread initalizing", element(i));
+            assert(!cerrh.nerrors());
+            if (_elements[i]->thread_configure(Element::THREAD_INITIALIZE, &cerrh, Bitvector(master()->nthreads())) >= 0) {
+                element_stage[i] = Element::CLEANUP_THREAD_INITIALIZED;
+            } else {
+                // don't report 'unspecified error' for ErrorElements:
+                // keep error messages clean
+                if (!cerrh.nerrors() && !_elements[i]->cast("Error"))
+                    cerrh.error("unspecified error");
+                element_stage[i] = Element::CLEANUP_THREAD_INITIALZE_FAILED;
+                all_ok = false;
+            }
         }
     }
 
@@ -1707,8 +1734,9 @@ Router::store_local_handler(int eindex, Handler &to_store)
                 break;
             }
         }
-        if (l >= r)
+        if (l >= r) {
             l = _handler_first_by_name.insert(l, -1);
+        } 
         name_index = l - _handler_first_by_name.begin();
     }
 

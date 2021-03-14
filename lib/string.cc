@@ -417,7 +417,11 @@ String::append_uninitialized(int len)
         && ((dirty = _r.memo->dirty), _r.memo->capacity > dirty + len)) {
         char *real_dirty = _r.memo->real_data + dirty;
         if (real_dirty == _r.data + _r.length
-            && atomic_uint32_t::compare_swap(_r.memo->dirty, dirty, dirty + len) == dirty) {
+#if ! CLICK_ATOMIC_COMPARE_SWAP
+	&& atomic_uint32_t::compare_and_swap(_r.memo->dirty, dirty, dirty + len)) {
+#else
+	&& atomic_uint32_t::compare_swap(_r.memo->dirty, dirty, dirty + len) == dirty) {
+#endif
             _r.length += len;
             assert(_r.memo->dirty < _r.memo->capacity);
 #if HAVE_STRING_PROFILING
@@ -840,6 +844,12 @@ String::encode_json() const
     } else
         return *this;
 }
+/** @brief Return a substring with spaces trimmed from both sides. */
+String
+String::trim() const
+{
+    return trim_space().trim_space_left();
+}
 
 /** @brief Return a substring with spaces trimmed from the end. */
 String
@@ -870,6 +880,22 @@ String::replace(char from, char to) const
     for (int i = 0; i < length(); i ++) {
         if (data[i] == from)
             data[i] = to;
+    }
+    return newStr;
+}
+
+/** @brief Return a string with from replaced by to */
+String
+String::replace(String from, String to) const
+{
+    String newStr = *this;
+    int pos = 0;
+    int found = 0;
+    int fromlen = from.length();
+    int tolen = to.length();
+    while ((found = newStr.find_left(from,pos)) >= 0) {
+        pos = found + tolen;
+        newStr = newStr.substring(0,found) + to + newStr.substring(found + fromlen);
     }
     return newStr;
 }

@@ -1812,9 +1812,9 @@ bool Element::do_mt_safe_check(ErrorHandler* errh) {
     Bitvector bmp = get_passing_threads();
     int n = bmp.weight();
 	if (n == 0) {
-		/*This makes a lot of testie fails because this message is added in a lot of case where it is normal in
+		/*This makes a lot of click tests fails because this message is added in a lot of case where it is normal in
 		test conditions where we use Idle to test only handlers. Before-reenabling this, add ignore line to all
-		failing testies*/
+		failing click tests*/
 		//errh->warning("%s seems to be traversed by no threads...",name().c_str());
 		return true;
 	}
@@ -1826,6 +1826,9 @@ void Element::add_remote_element(Element* e) {
 }
 
 int Element::thread_configure(ThreadReconfigurationStage stage, ErrorHandler* errh, Bitvector threads) {
+    (void)stage;
+    (void)errh;
+    (void)threads;
     return 0;
 }
 
@@ -1842,6 +1845,11 @@ public:
 
     bool visit(Element *e, bool isoutput, int port,
                    Element *from_e, int from_port, int distance) {
+        (void)isoutput;
+        (void)port;
+        (void)from_e;
+        (void)from_port;
+        (void)distance;
         e->thread_configure(_stage, _errh, _threads);
         return true;
     }
@@ -1854,8 +1862,6 @@ public:
  *  In practice, it will call thread_reconfigure with UP_PRE or DOWN_PRE on
  *      downstream elements, execute the ready function, then call UP_POST or
  *      DOWN_POST
- *
- *
  *
  *  @param is_up True if the threads are being activated, false if deactivated.
  */

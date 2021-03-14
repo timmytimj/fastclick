@@ -120,9 +120,9 @@ class IPAddrPairRewriter : public IPRewriterBase { public:
 
 	IPAddrPairFlow(IPRewriterInput *owner, const IPFlowID &flowid,
 		       const IPFlowID &rewritten_flowid,
-		       bool guaranteed, click_jiffies_t expiry_j)
+		       bool guaranteed, click_jiffies_t expiry_j, uint8_t port)
 	    : IPRewriterFlow(owner, flowid, rewritten_flowid,
-			     0, guaranteed, expiry_j) {
+			     0, guaranteed, expiry_j, port) {
 	}
 
 	void apply(WritablePacket *p, bool direction, unsigned annos);
@@ -134,7 +134,7 @@ class IPAddrPairRewriter : public IPRewriterBase { public:
     IPAddrPairRewriter() CLICK_COLD;
     ~IPAddrPairRewriter() CLICK_COLD;
 
-    const char *class_name() const		{ return "IPAddrPairRewriter"; }
+    const char *class_name() const override		{ return "IPAddrPairRewriter"; }
     void *cast(const char *);
 
     int configure(Vector<String> &conf, ErrorHandler *errh) CLICK_COLD;
@@ -172,7 +172,7 @@ class IPAddrPairRewriter : public IPRewriterBase { public:
 inline void
 IPAddrPairRewriter::destroy_flow(IPRewriterFlow *flow)
 {
-    unmap_flow(flow, _map[click_current_cpu_id()]);
+    unmap_flow(flow, _state->map);
     static_cast<IPAddrPairFlow *>(flow)->~IPAddrPairFlow();
     _allocator[click_current_cpu_id()].deallocate(flow);
 }

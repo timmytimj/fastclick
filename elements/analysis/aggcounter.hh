@@ -186,6 +186,26 @@ form.
   DriverManager(wait_pause,
 	write ac.write_text_file -);
 
+Will output something like:
+
+    !IPAggregate 1.0
+    !num_nonzero 15
+    2342847313 4
+    2342848755 10
+    2342855240 6
+    2342855720 1
+    2342856146 6
+    2342859764 1
+    2342862860 1
+    2342865100 1
+    2342867259 1
+    2342868704 3
+    2342871589 7
+    2342873863 15
+    2342878686 2
+    2342889502 2
+    2342895905 5
+
 =a
 
 AggregateIP, AggregatePacketCounter, FromIPSummaryDump, FromDump */
@@ -212,7 +232,7 @@ class AggregateCounterBase : public BatchElement { public:
     AggregateCounterBase() CLICK_COLD;
     ~AggregateCounterBase() CLICK_COLD;
 
-    const char *port_count() const	{ return "1-2/1-2"; }
+    const char *port_count() const override	{ return "1-2/1-2"; }
 
     int configure(Vector<String> &, ErrorHandler *) CLICK_COLD;
     int initialize(ErrorHandler *) CLICK_COLD;
@@ -245,6 +265,7 @@ class AggregateCounterBase : public BatchElement { public:
 
     T _state;
     uint32_t _num_nonzero;
+    uint32_t _mask;
 
     uint32_t _call_nnz;
     HandlerCall *_call_nnz_h;
@@ -270,11 +291,11 @@ class AggregateCounterBase : public BatchElement { public:
 
 };
 class AggregateCounter : public AggregateCounterBase<not_per_thread<AggregateCounterState> > { public:
-    const char *class_name() const  { return "AggregateCounter"; }
+    const char *class_name() const override  { return "AggregateCounter"; }
 };
 
 class AggregateCounterIMP : public AggregateCounterBase<per_thread<AggregateCounterState> > { public:
-    const char *class_name() const  { return "AggregateCounterIMP"; }
+    const char *class_name() const override  { return "AggregateCounterIMP"; }
 };
 
 

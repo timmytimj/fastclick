@@ -6,6 +6,7 @@
 #include <click/task.hh>
 #include <click/dpdkdevice.hh>
 #include "queuedevice.hh"
+#include "../../vendor/nicscheduler/ethernetdevice.hh"
 
 CLICK_DECLS
 
@@ -228,6 +229,7 @@ Returns the device's link type (only fiber is currently supported).
 =h xstats read-only
 
 Returns a device's detailed packet and byte counters.
+If a parameter is given, only the matching counter will be returned.
 
 =h queue_count read-only
 
@@ -341,7 +343,7 @@ Returns the number of errors of this device, as computed by the hardware.
 
 =h nombufs read-only
 
-Returns the number of mbufs allocated for this devce.
+Returns the total number of RX mbuf allocation failures. 
 
 =h rule_add write-only
 
@@ -403,25 +405,26 @@ public:
     FromDPDKDevice() CLICK_COLD;
     ~FromDPDKDevice() CLICK_COLD;
 
-    const char *class_name() const { return "FromDPDKDevice"; }
-    const char *port_count() const { return PORTS_0_1; }
-    const char *processing() const { return PUSH; }
+    const char *class_name() const override { return "FromDPDKDevice"; }
+    const char *port_count() const override { return PORTS_0_1; }
+    const char *processing() const override { return PUSH; }
     void* cast(const char* name) override;
 
-    int configure_phase() const {
+    int configure_phase() const override {
         return CONFIGURE_PHASE_PRIVILEGED - 5;
     }
-    bool can_live_reconfigure() const { return false; }
+    bool can_live_reconfigure() const override { return false; }
 
-    int configure(Vector<String> &, ErrorHandler *) CLICK_COLD;
-    int initialize(ErrorHandler *) CLICK_COLD;
-    void add_handlers() CLICK_COLD;
-    void cleanup(CleanupStage) CLICK_COLD;
-    bool run_task(Task *);
+    int configure(Vector<String> &, ErrorHandler *) override CLICK_COLD;
+    int initialize(ErrorHandler *) override CLICK_COLD;
+    void add_handlers() override CLICK_COLD;
+    void cleanup(CleanupStage) override CLICK_COLD;
+    bool run_task(Task *) override;
 #if HAVE_DPDK_INTERRUPT
-    void selected(int fd, int mask);
+    void selected(int fd, int mask) override;
 #endif
 
+    void clear_buffers() CLICK_COLD;
     inline DPDKDevice *get_device() {
         return _dev;
     }
@@ -430,7 +433,11 @@ public:
     static uint64_t read_clock(void* thunk);
 #endif
 
-private:
+    inline EthernetDevice *get_eth_device() {
+        return _dev->get_eth_device();
+    }
+
+protected:
     static int reset_load_handler(
         const String &, Element *, void *, ErrorHandler *
     ) CLICK_COLD;
@@ -447,8 +454,8 @@ private:
     static String statistics_handler(Element *e, void *thunk) CLICK_COLD;
     static int xstats_handler(int operation, String &input, Element *e,
                               const Handler *handler, ErrorHandler *errh);
-    DPDKDevice* _dev;
 
+    DPDKDevice* _dev;
 #if HAVE_DPDK_INTERRUPT
     int _rx_intr;
     class FDState { public:
@@ -458,6 +465,10 @@ private:
     per_thread<FDState> _fdstate;
 #endif
     bool _set_timestamp;
+    bool _tco;
+    bool _uco;
+    bool _ipco;
+    bool _clear;
 };
 
 CLICK_ENDDECLS

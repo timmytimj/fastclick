@@ -38,13 +38,13 @@ public:
     Pipeliner();
     ~Pipeliner();
 
-    const char *class_name() const      { return "Pipeliner"; }
-    const char *port_count() const      { return "1-/1"; }
-    const char *processing() const      { return PUSH; }
+    const char *class_name() const override      { return "Pipeliner"; }
+    const char *port_count() const override      { return "1-/1"; }
+    const char *processing() const override      { return PUSH; }
 
-    int configure(Vector<String>&, ErrorHandler*) CLICK_COLD;
-
-    int initialize(ErrorHandler*) CLICK_COLD;
+    int configure(Vector<String>&, ErrorHandler*) override CLICK_COLD;
+    int thread_configure(ThreadReconfigurationStage, ErrorHandler*, Bitvector threads) override CLICK_COLD;
+    int initialize(ErrorHandler *errh) override CLICK_COLD;
 
     void cleanup(CleanupStage);
 
@@ -95,6 +95,7 @@ public:
     bool _always_up;
     bool _allow_direct_traversal;
     bool _verbose;
+    bool _prefetch;
     typedef DynamicRing<Packet*> PacketRing;
 
     per_thread_oread<PacketRing> storage;

@@ -13,7 +13,7 @@ bindir = @bindir@
 sbindir = @sbindir@
 libdir = @libdir@
 
-VPATH = .:$(top_srcdir)/lib:$(top_srcdir)/vendor/tinyexpr:$(top_srcdir)/$(subdir):$(top_srcdir)/elements/standard
+VPATH = .:$(top_srcdir)/lib:$(top_srcdir)/vendor/tinyexpr:$(top_srcdir)/vendor/nicscheduler:$(top_srcdir)/lib/metron:$(top_srcdir)/$(subdir):$(top_srcdir)/elements/standard
 
 CC = @CC@
 CPP = @CPP@
@@ -23,6 +23,8 @@ DEPCFLAGS = @DEPCFLAGS@
 AR_CREATE = @AR@ @AR_CREATEFLAGS@
 RANLIB = @RANLIB@
 INSTALL = @INSTALL@
+CLICK_SHARED = @CLICK_SHARED@
+HAVE_FLOW_API = @HAVE_FLOW_API@
 mkinstalldirs = $(conf_auxdir)/mkinstalldirs
 
 CLICK_BUILDTOOL = $(top_builddir)/bin/click-buildtool
@@ -68,11 +70,12 @@ GENERIC_OBJS = string.o straccum.o nameinfo.o \
 	packet.o packetbatch.o \
 	error.o timestamp.o glue.o task.o timer.o atomic.o fromfile.o gaprate.o \
 	element.o batchelement.o tcphelper.o flowelement.o flow.o \
-	allocator.o \
+	allocator.o json.o \
 	confparse.o args.o variableenv.o lexer.o elemfilter.o routervisitor.o \
 	routerthread.o router.o master.o timerset.o selectset.o handlercall.o notifier.o \
 	integers.o md5.o crc32.o in_cksum.o iptable.o \
-	archive.o userutils.o driver.o tinyexpr.o \
+	archive.o userutils.o driver.o \
+	tinyexpr.o nicscheduler.o \
 	$(EXTRA_DRIVER_OBJS)
 
 EXTRA_DRIVER_OBJS = @EXTRA_DRIVER_OBJS@
@@ -103,21 +106,18 @@ LINK = $(CCLD) $(CFLAGS) $(LDFLAGS) -o $@
 
 USE_DPDK = @USE_DPDK@
 ifeq ($(USE_DPDK),yes)
-ifeq ($(shell pkg-config --exists libdpdk && echo 1), 1)
-CFLAGS := $(CFLAGS) $(shell pkg-config --cflags libdpdk)
-CXXFLAGS := $(CFLAGS) $(shell pkg-config --cflags libdpdk)
-LDFLAGS := $(LDFLAGS) $(shell pkg-config --libs libdpdk) -Wl,-Bstatic $(shell pkg-config --static --libs libdpdk)
-else
-RTE_SDK = @RTE_SDK@
-RTE_TARGET = @RTE_TARGET@
-RTE_VER_MAJOR = @RTE_VER_MAJOR@
-RTE_VER_MINOR = @RTE_VER_MINOR@
-RTE_VER_YEAR = @RTE_VER_YEAR@
-RTE_VER_MONTH = @RTE_VER_MONTH@
-include dpdk.mk
-endif
-EXTRA_DRIVER_OBJS := dpdkdevice.o $(EXTRA_DRIVER_OBJS)
-	ifeq ($(shell [ -n "$(RTE_VER_YEAR)" ] && [ "$(RTE_VER_YEAR)" -ge 20 ] && echo true),true)
+	RTE_SDK = @RTE_SDK@
+	RTE_TARGET = @RTE_TARGET@
+	RTE_VER_MAJOR = @RTE_VER_MAJOR@
+	RTE_VER_MINOR = @RTE_VER_MINOR@
+	RTE_VER_YEAR = @RTE_VER_YEAR@
+	RTE_VER_MONTH = @RTE_VER_MONTH@
+	RTE_USE_PKGCONFIG = @RTE_USE_PKGCONFIG@
+	include rte_parse.mk
+	CFLAGS := $(CFLAGS) @DPDK_CFLAGS@
+	CXXFLAGS := $(CXXFLAGS) @DPDK_CFLAGS@
+	EXTRA_DRIVER_OBJS := dpdkdevice.o $(EXTRA_DRIVER_OBJS)
+	ifeq ($(shell [ ${HAVE_FLOW_API} -eq 1 ] && echo true),true)
 		EXTRA_DRIVER_OBJS := flowrulemanager.o flowrulecache.o flowruleparser.o $(EXTRA_DRIVER_OBJS)
 	endif
 endif
@@ -128,9 +128,12 @@ ELEMENTSCONF = elements
 INSTALLLIBS = libclick.a
 FINDELEMFLAGS = @FINDELEMFLAGS@ --checksum elements.csmk
 -include elements.csmk
+ELEM2EXPORT = elem2export
 else
 DRIVER = $(MINDRIVER)click
 ELEMENTSCONF = elements_$(MINDRIVER)
+ELEM2EXPORT = elem2export
+ELEMENTSSUFFIX =
 endif
 INSTALLPROGS = $(DRIVER)
 
@@ -147,20 +150,16 @@ ifneq ($(MAKECMDGOALS),clean)
 -include $(ELEMENTSCONF).mk
 endif
 
-# At of after DPDK 20.02, compile against an additional library librte_parse (flow parser)
-ifeq ($(shell [ -n "$(RTE_VER_YEAR)" ] && [ "$(RTE_VER_YEAR)" -ge 20 ] && echo true),true)
+# At of after HAVE_FLOW_API, compile against an additional library librte_parse (flow parser)
+ifeq ($(shell [ ${HAVE_FLOW_API} -eq 1 ] && echo true),true)
 ddeps: Makefile librte_parse.a libclick.a $(OBJS)
 
 $(DRIVER): ${PARSE_PATH}.sentinel ddeps
 	$(call cxxlink,$(DL_LDFLAGS) $(OBJS) libclick.a librte_parse.a $(LIBS),LINK)
 	@-mkdir -p ../bin; rm -f ../bin/$@; ln -s ../userlevel/$@ ../bin/$@
-else ifeq ($(shell [ -n "$(RTE_VER_YEAR)" ] && ( ( [ "$(RTE_VER_YEAR)" -ge 17 ] && [ "$(RTE_VER_MONTH)" -ge 5 ] ) || [ $(RTE_VER_YEAR) -ge 18 ] ) && echo true),true)
-$(DRIVER): Makefile libclick.a $(OBJS)
-	$(call cxxlink,$(DL_LDFLAGS) $(OBJS) libclick.a $(LIBS),LINK)
-	@-mkdir -p ../bin; rm -f ../bin/$@; ln -s ../userlevel/$@ ../bin/$@
 else
 $(DRIVER): Makefile libclick.a $(OBJS)
-	$(call cxxlink,$(DL_LDFLAGS) $(OBJS) libclick.a $(LIBS) $(DPDK_LIBS),LINK)
+	$(call cxxlink,$(DL_LDFLAGS) $(OBJS) libclick.a $(LIBS),LINK)
 	@-mkdir -p ../bin; rm -f ../bin/$@; ln -s ../userlevel/$@ ../bin/$@
 endif
 
@@ -178,8 +177,8 @@ elements.conf: $(top_builddir)/config.status $(CLICK_BUILDTOOL)
 	$(call verbose_cmd,echo "userlevel @element_groups@" | $(CLICK_BUILDTOOL) findelem -r userlevel -p $(top_srcdir) -X $(srcdir)/elements.exclude $(FINDELEMFLAGS) >,FINDELEMENTS,elements.conf)
 $(ELEMENTSCONF).mk: $(ELEMENTSCONF).conf $(CLICK_BUILDTOOL)
 	$(call verbose_cmd,$(CLICK_BUILDTOOL) elem2make -x "$(STD_ELEMENT_OBJS)" < $(ELEMENTSCONF).conf >,CREATE,$(ELEMENTSCONF).mk)
-$(ELEMENTSCONF).cc: $(ELEMENTSCONF).conf $(CLICK_BUILDTOOL)
-	$(call verbose_cmd,$(CLICK_BUILDTOOL) elem2export < $(ELEMENTSCONF).conf >,CREATE,$(ELEMENTSCONF).cc)
+$(ELEMENTSCONF)$(ELEMENTSSUFFIX).cc: $(ELEMENTSCONF).conf $(CLICK_BUILDTOOL)
+	$(call verbose_cmd,$(CLICK_BUILDTOOL) $(ELEM2EXPORT) < $(ELEMENTSCONF).conf >,CREATE,$(ELEMENTSCONF)$(ELEMENTSSUFFIX).cc)
 	@rm -f $(ELEMENTSCONF).d
 
 DEPFILES := $(wildcard *.d)
@@ -203,7 +202,7 @@ uninstall:
 
 clean:
 	rm -f *.d *.o $(INSTALLPROGS) $(ELEMENTSCONF).mk $(ELEMENTSCONF).cc elements.conf elements.csmk libclick.a
-ifeq ($(shell [ -n "$(RTE_VER_YEAR)" ] && [ "$(RTE_VER_YEAR)" -ge 20 ] && echo true),true)
+ifeq ($(shell [ ${HAVE_FLOW_API} ] && echo true),true)
 	rm -rf test-pmd/ ../lib/librte_parse_* librte_parse.*
 endif
 	@-for i in $(INSTALLPROGS); do rm -f ../bin/$$i; done

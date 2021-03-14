@@ -12,11 +12,33 @@ CLICK_DECLS
 
 class Args;
 
+/*
+=c
+
+Replay([, I<KEYWORDS>])
+
+=s traces
+
+replay an input of packets at a given speed
+
+=d
+
+
+Keyword arguments are:
+
+=over 8
+
+=item STOP
+
+Integer.  Number of loop to replay.
+
+*/
+
 class ReplayBase : public BatchElement { public:
 	ReplayBase() CLICK_COLD;
     ~ReplayBase() CLICK_COLD;
 
-    const char *port_count() const	{ return "1-/="; }
+    const char *port_count() const override	{ return "1-/="; }
 
     int parse(Args*);
 
@@ -66,10 +88,10 @@ class Replay : public ReplayBase { public:
 	Replay() CLICK_COLD;
     ~Replay() CLICK_COLD;
 
-    const char *class_name() const	{ return "Replay"; }
-    const char *port_count() const  { return "1-/="; }
-    const char *flow_code() const   { return "#/#"; }
-    const char *processing() const	{ return PULL; }
+    const char *class_name() const override	{ return "Replay"; }
+    const char *port_count() const override  { return "1-/="; }
+    const char *flow_code() const override   { return "#/#"; }
+    const char *processing() const override	{ return PULL; }
 
     bool get_spawning_threads(Bitvector&, bool, int) override {
         return false;
@@ -101,9 +123,9 @@ class ReplayUnqueue : public ReplayBase { public:
 	ReplayUnqueue() CLICK_COLD;
     ~ReplayUnqueue() CLICK_COLD;
 
-    const char *class_name() const	{ return "ReplayUnqueue"; }
-    const char *flow_code() const	{ return "#/#"; }
-    const char *processing() const	{ return PULL_TO_PUSH; }
+    const char *class_name() const override	{ return "ReplayUnqueue"; }
+    const char *flow_code() const override	{ return "#/#"; }
+    const char *processing() const override	{ return PULL_TO_PUSH; }
 
     int configure(Vector<String> &, ErrorHandler *) CLICK_COLD;
     int initialize(ErrorHandler *errh) CLICK_COLD;
@@ -140,7 +162,7 @@ inline bool ReplayBase::load_packets() {
                 if (p_input[i] == 0) {
                     do_pull:
 #if HAVE_BATCH
-                    p_input[i] = input_pull_batch(i,1);
+                    p_input[i] = input_pull_batch(i,1)->first();
 #else
                     p_input[i] = input(i).pull();
 #endif

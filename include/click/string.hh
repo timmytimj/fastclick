@@ -103,9 +103,11 @@ class String { public:
     inline String substring(const char *begin, const char *end) const;
     String substring(int pos, int len) const;
     inline String substring(int pos) const;
+    String trim() const;
     String trim_space() const;
     String trim_space_left() const;
     String replace(char from, char to) const;
+    String replace(String from, String to) const;
 
     inline bool equals(const String &x) const;
     inline bool equals(const char *s, int len) const;
